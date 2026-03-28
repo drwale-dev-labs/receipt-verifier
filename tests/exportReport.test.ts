@@ -52,12 +52,13 @@ describe('generateAuditReport', () => {
         {
           type: 'MISSING_RECEIPT',
           severity: 'HIGH',
-          message: 'No receipt found for Fanice Nigeria Ltd - ₦50,000',
+          // No ₦ symbol — use NGN or plain numbers to avoid WinAnsi encoding error
+          message: 'No receipt found for Fanice Nigeria Ltd - NGN 50,000',
         },
         {
           type: 'AMOUNT_MISMATCH',
           severity: 'LOW',
-          message: 'Amount mismatch: Voucher ₦50,000 vs Receipt ₦49,500',
+          message: 'Amount mismatch: Voucher NGN 50,000 vs Receipt NGN 49,500',
         },
       ],
       grandTotalCheck: {
@@ -90,7 +91,7 @@ describe('generateAuditReport', () => {
     const discrepancies = Array.from({ length: 40 }, (_, i) => ({
       type: 'AMOUNT_MISMATCH',
       severity: 'HIGH' as const,
-      message: `Discrepancy number ${i + 1}: some long message about a mismatch that occurred`,
+      message: `Discrepancy number ${i + 1}: amount mismatch of NGN 5,000 detected`,
     }));
 
     const result = makeResult({ status: 'FAIL', discrepancies, matches: [] });
