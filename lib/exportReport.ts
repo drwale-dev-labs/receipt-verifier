@@ -8,6 +8,12 @@ const MARGIN = 50;
 const LINE_HEIGHT = 16;
 const MIN_Y = 80;
 
+// ₦ cannot be encoded by WinAnsi (Helvetica/standard PDF fonts).
+// We use "NGN" prefix instead — clear, professional, no encoding errors.
+function naira(amount: number): string {
+  return `NGN ${amount.toLocaleString()}`;
+}
+
 function createPageContext(pdfDoc: PDFDocument) {
   const page = pdfDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
   let y = PAGE_HEIGHT - 60;
@@ -41,33 +47,19 @@ export async function generateAuditReport(result: VerificationResult) {
 
   // ── Header ──────────────────────────────────────────────────────────
   ctx.page.drawText('LEAD SUPERSTORE', {
-    x: MARGIN,
-    y: ctx.y,
-    size: 16,
-    font: boldFont,
-    color: rgb(0.05, 0.25, 0.55),
+    x: MARGIN, y: ctx.y, size: 16, font: boldFont, color: rgb(0.05, 0.25, 0.55),
   });
   ctx.y -= 18;
 
   ctx.page.drawText('Payment Verification Report', {
-    x: MARGIN,
-    y: ctx.y,
-    size: 11,
-    font,
-    color: rgb(0.4, 0.4, 0.4),
+    x: MARGIN, y: ctx.y, size: 11, font, color: rgb(0.4, 0.4, 0.4),
   });
-
-  ctx.page.drawText(`Generated: ${new Date().toLocaleDateString('en-NG', { dateStyle: 'long' })}`, {
-    x: PAGE_WIDTH - MARGIN - 160,
-    y: ctx.y,
-    size: 9,
-    font,
-    color: rgb(0.5, 0.5, 0.5),
-  });
-
+  ctx.page.drawText(
+    `Generated: ${new Date().toLocaleDateString('en-NG', { dateStyle: 'long' })}`,
+    { x: PAGE_WIDTH - MARGIN - 160, y: ctx.y, size: 9, font, color: rgb(0.5, 0.5, 0.5) }
+  );
   ctx.y -= 6;
 
-  // Divider
   ctx.page.drawLine({
     start: { x: MARGIN, y: ctx.y },
     end: { x: PAGE_WIDTH - MARGIN, y: ctx.y },
@@ -78,57 +70,36 @@ export async function generateAuditReport(result: VerificationResult) {
 
   // ── Status Banner ───────────────────────────────────────────────────
   ctx.page.drawRectangle({
-    x: MARGIN,
-    y: ctx.y - 28,
-    width: PAGE_WIDTH - MARGIN * 2,
-    height: 36,
-    color:
-      result.status === 'PASS'
-        ? rgb(0.9, 1, 0.92)
-        : result.status === 'WARNING'
-        ? rgb(1, 0.97, 0.88)
-        : rgb(1, 0.92, 0.92),
+    x: MARGIN, y: ctx.y - 28,
+    width: PAGE_WIDTH - MARGIN * 2, height: 36,
+    color: result.status === 'PASS' ? rgb(0.9, 1, 0.92)
+         : result.status === 'WARNING' ? rgb(1, 0.97, 0.88)
+         : rgb(1, 0.92, 0.92),
     borderColor: statusColor,
     borderWidth: 1,
   });
-
   ctx.page.drawText(`STATUS: ${result.status}`, {
-    x: MARGIN + 12,
-    y: ctx.y - 14,
-    size: 12,
-    font: boldFont,
-    color: statusColor,
+    x: MARGIN + 12, y: ctx.y - 14, size: 12, font: boldFont, color: statusColor,
   });
-
   ctx.page.drawText(result.summary, {
-    x: MARGIN + 100,
-    y: ctx.y - 14,
-    size: 9,
-    font,
-    color: rgb(0.3, 0.3, 0.3),
+    x: MARGIN + 100, y: ctx.y - 14, size: 9, font, color: rgb(0.3, 0.3, 0.3),
   });
-
   ctx.y -= 52;
 
   // ── Grand Total Section ─────────────────────────────────────────────
   ensureSpace(pdfDoc, ctx, 90);
-
   ctx.page.drawText('Grand Total Reconciliation', {
-    x: MARGIN,
-    y: ctx.y,
-    size: 11,
-    font: boldFont,
-    color: rgb(0.1, 0.1, 0.1),
+    x: MARGIN, y: ctx.y, size: 11, font: boldFont, color: rgb(0.1, 0.1, 0.1),
   });
   ctx.y -= 20;
 
   const col = (PAGE_WIDTH - MARGIN * 2) / 3;
   const totals = [
-    { label: 'Voucher Total', value: `₦${result.grandTotalCheck.voucherTotal.toLocaleString()}` },
-    { label: 'Receipts Total', value: `₦${result.grandTotalCheck.receiptsTotal.toLocaleString()}` },
+    { label: 'Voucher Total',  value: naira(result.grandTotalCheck.voucherTotal) },
+    { label: 'Receipts Total', value: naira(result.grandTotalCheck.receiptsTotal) },
     {
       label: 'Difference',
-      value: `₦${result.grandTotalCheck.difference.toLocaleString()}`,
+      value: naira(result.grandTotalCheck.difference),
       color: result.grandTotalCheck.difference === 0 ? rgb(0, 0.6, 0) : rgb(0.8, 0, 0),
     },
   ];
@@ -145,32 +116,18 @@ export async function generateAuditReport(result: VerificationResult) {
   if (result.discrepancies.length > 0) {
     ensureSpace(pdfDoc, ctx, 30);
     ctx.page.drawText('Discrepancies Found', {
-      x: MARGIN,
-      y: ctx.y,
-      size: 11,
-      font: boldFont,
-      color: rgb(0.75, 0.1, 0.1),
+      x: MARGIN, y: ctx.y, size: 11, font: boldFont, color: rgb(0.75, 0.1, 0.1),
     });
     ctx.y -= 18;
 
-    for (let i = 0; i < result.discrepancies.length; i++) {
-      const d = result.discrepancies[i];
+    for (const d of result.discrepancies) {
       ensureSpace(pdfDoc, ctx, LINE_HEIGHT + 4);
-
       const dotColor = d.severity === 'HIGH' ? rgb(0.8, 0, 0) : rgb(0.85, 0.55, 0);
       ctx.page.drawCircle({ x: MARGIN + 5, y: ctx.y - 4, size: 3, color: dotColor });
-
       const label = `[${d.type}] ${d.message}`;
-      // Truncate long lines
-      const maxChars = 90;
-      const display = label.length > maxChars ? label.substring(0, maxChars) + '…' : label;
-
+      const display = label.length > 90 ? label.substring(0, 90) + '...' : label;
       ctx.page.drawText(display, {
-        x: MARGIN + 14,
-        y: ctx.y - 8,
-        size: 8.5,
-        font,
-        color: rgb(0.2, 0.2, 0.2),
+        x: MARGIN + 14, y: ctx.y - 8, size: 8.5, font, color: rgb(0.2, 0.2, 0.2),
       });
       ctx.y -= LINE_HEIGHT + 2;
     }
@@ -181,27 +138,16 @@ export async function generateAuditReport(result: VerificationResult) {
   if (result.matches.length > 0) {
     ensureSpace(pdfDoc, ctx, 30);
     ctx.page.drawText('Verified Matches', {
-      x: MARGIN,
-      y: ctx.y,
-      size: 11,
-      font: boldFont,
-      color: rgb(0, 0.55, 0.2),
+      x: MARGIN, y: ctx.y, size: 11, font: boldFont, color: rgb(0, 0.55, 0.2),
     });
     ctx.y -= 18;
 
-    for (let i = 0; i < result.matches.length; i++) {
-      const m = result.matches[i];
+    for (const m of result.matches) {
       ensureSpace(pdfDoc, ctx, LINE_HEIGHT + 4);
-
-      ctx.page.drawText('✓', { x: MARGIN + 3, y: ctx.y - 8, size: 9, font: boldFont, color: rgb(0, 0.6, 0.2) });
-
-      const label = `${m.entry.account_name}  ·  ${m.entry.bank}  ·  Acct: ${m.entry.account_number}  ·  ₦${m.entry.amount.toLocaleString()}`;
+      ctx.page.drawText('OK', { x: MARGIN + 3, y: ctx.y - 8, size: 8, font: boldFont, color: rgb(0, 0.6, 0.2) });
+      const label = `${m.entry.account_name}  |  ${m.entry.bank}  |  Acct: ${m.entry.account_number}  |  ${naira(m.entry.amount)}`;
       ctx.page.drawText(label, {
-        x: MARGIN + 16,
-        y: ctx.y - 8,
-        size: 8.5,
-        font,
-        color: rgb(0.15, 0.15, 0.15),
+        x: MARGIN + 22, y: ctx.y - 8, size: 8.5, font, color: rgb(0.15, 0.15, 0.15),
       });
       ctx.y -= LINE_HEIGHT + 2;
     }
@@ -217,19 +163,11 @@ export async function generateAuditReport(result: VerificationResult) {
       thickness: 0.5,
       color: rgb(0.8, 0.8, 0.8),
     });
-    p.drawText('Lead Superstore · Confidential Audit Report', {
-      x: MARGIN,
-      y: 42,
-      size: 7.5,
-      font,
-      color: rgb(0.6, 0.6, 0.6),
+    p.drawText('Lead Superstore - Confidential Audit Report', {
+      x: MARGIN, y: 42, size: 7.5, font, color: rgb(0.6, 0.6, 0.6),
     });
     p.drawText(`Page ${idx + 1} of ${pages.length}`, {
-      x: PAGE_WIDTH - MARGIN - 50,
-      y: 42,
-      size: 7.5,
-      font,
-      color: rgb(0.6, 0.6, 0.6),
+      x: PAGE_WIDTH - MARGIN - 50, y: 42, size: 7.5, font, color: rgb(0.6, 0.6, 0.6),
     });
   });
 

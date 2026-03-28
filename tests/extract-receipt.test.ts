@@ -1,17 +1,20 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// Mock Anthropic SDK before importing the route
+// ── Mock setup ───────────────────────────────────────────────────────────────
+// Anthropic is instantiated with `new Anthropic()` so the mock must be a class,
+// not an arrow function. We use a proper vi.fn() class with a shared mockCreate
+// so each test can control what messages.create() returns.
+
+const mockCreate = vi.fn();
+
 vi.mock('@anthropic-ai/sdk', () => {
   return {
-    default: vi.fn().mockImplementation(() => ({
-      messages: {
-        create: vi.fn(),
-      },
-    })),
+    default: vi.fn().mockImplementation(function (this: { messages: { create: typeof mockCreate } }) {
+      this.messages = { create: mockCreate };
+    }),
   };
 });
 
-// Mock Next.js server module
 vi.mock('next/server', () => ({
   NextRequest: class {
     constructor(public url: string, public init?: RequestInit) {}
@@ -25,7 +28,7 @@ vi.mock('next/server', () => ({
   },
 }));
 
-import Anthropic from '@anthropic-ai/sdk';
+// ── Fixtures ─────────────────────────────────────────────────────────────────
 
 const mockReceiptJSON = {
   supplier_name: 'Fanice Nigeria Ltd',
@@ -43,30 +46,31 @@ const mockReceiptJSON = {
   notes: '',
 };
 
-function makeRequest(file: File) {
-  const formData = new FormData();
-  formData.append('file', file);
-  return {
-    formData: async () => formData,
-  } as any;
-}
-
 function makeFile(type = 'image/jpeg') {
   return new File(['fake-image-bytes'], 'receipt.jpg', { type });
 }
 
-describe('POST /api/extract-receipt', () => {
-  let anthropicInstance: any;
+function makeRequest(file: File) {
+  const formData = new FormData();
+  formData.append('file', file);
+  return { formData: async () => formData } as any;
+}
 
-  beforeEach(async () => {
+function makeEmptyRequest() {
+  return { formData: async () => new FormData() } as any;
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+describe('POST /api/extract-receipt', () => {
+  beforeEach(() => {
     vi.resetModules();
+    mockCreate.mockReset();
     process.env.ANTHROPIC_API_KEY = 'sk-ant-test-key';
-    const AnthropicConstructor = (await import('@anthropic-ai/sdk')).default as any;
-    anthropicInstance = new AnthropicConstructor();
   });
 
   it('returns parsed JSON from Claude on success', async () => {
-    anthropicInstance.messages.create.mockResolvedValueOnce({
+    mockCreate.mockResolvedValueOnce({
       content: [{ type: 'text', text: JSON.stringify(mockReceiptJSON) }],
     });
 
@@ -79,7 +83,7 @@ describe('POST /api/extract-receipt', () => {
   });
 
   it('strips markdown fences from Claude response', async () => {
-    anthropicInstance.messages.create.mockResolvedValueOnce({
+    mockCreate.mockResolvedValueOnce({
       content: [{ type: 'text', text: `\`\`\`json\n${JSON.stringify(mockReceiptJSON)}\n\`\`\`` }],
     });
 
@@ -102,17 +106,14 @@ describe('POST /api/extract-receipt', () => {
   });
 
   it('returns 400 if no file is provided', async () => {
-    const emptyFormData = new FormData();
-    const req = { formData: async () => emptyFormData } as any;
-
     const { POST } = await import('../app/api/extract-receipt/route');
-    const response = await POST(req);
+    const response = await POST(makeEmptyRequest());
 
     expect(response.status).toBe(400);
   });
 
   it('returns 502 if Claude returns invalid JSON', async () => {
-    anthropicInstance.messages.create.mockResolvedValueOnce({
+    mockCreate.mockResolvedValueOnce({
       content: [{ type: 'text', text: 'not valid json at all' }],
     });
 
