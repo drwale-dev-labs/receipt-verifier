@@ -2,22 +2,14 @@
 'use client';
 import { useState, useRef } from 'react';
 import { useDropzone } from 'react-dropzone';
-import { verifyDocuments, VerificationResult, ExtractedReceipt, ExtractedVoucher } from '../../lib/verificationEngine';
-import { compressImages, compressImage } from '../../lib/compressImage';
+import type { VerificationResult, ExtractedReceipt, ExtractedVoucher } from '../../lib/verificationEngine';
+import { extractReceiptAction, extractVoucherAction } from '../../lib/actions';
+import { verifyDocuments } from '../../lib/verificationEngine';
 
-// ── Error helper — gives user a readable message instead of silent crash ────
-function parseApiError(status: number, body: any): string {
-  if (status === 413) {
-    return 'One or more files are too large. The app will automatically compress images — please try again.';
-  }
-  if (status === 415) {
-    return `Unsupported file type: ${body?.error || ''}. Use JPEG, PNG, or PDF.`;
-  }
-  if (status === 400) return 'No file was received by the server. Please try again.';
-  if (status === 500) return `Server error: ${body?.error || 'Check that ANTHROPIC_API_KEY is set.'}`;
-  if (status === 502) return 'Claude returned an unreadable response. Please try again.';
-  return body?.error || `Unexpected error (HTTP ${status})`;
-}
+// NOTE: We call Server Actions directly (not fetch /api/*).
+// Server Actions respect next.config.js serverActions.bodySizeLimit = '20mb',
+// so files up to 20MB are accepted. Route Handlers are capped at 4.5MB by
+// Vercel infrastructure with no override available.
 
 export default function VerifyPage() {
   const [receipts, setReceipts] = useState<File[]>([]);
@@ -31,27 +23,7 @@ export default function VerifyPage() {
   const cachedReceiptData = useRef<ExtractedReceipt[] | null>(null);
   const cachedVoucherData = useRef<ExtractedVoucher | null>(null);
 
-  const clearError = () => setError(null);
-
-  const removeReceipt = (index: number) => {
-    setReceipts(prev => prev.filter((_, i) => i !== index));
-    setResult(null);
-    setError(null);
-    cachedReceiptData.current = null;
-    cachedVoucherData.current = null;
-  };
-
-  const removeVoucher = () => {
-    setVoucher(null);
-    setResult(null);
-    setError(null);
-    cachedReceiptData.current = null;
-    cachedVoucherData.current = null;
-  };
-
-  const clearAllFiles = () => {
-    setReceipts([]);
-    setVoucher(null);
+  const reset = () => {
     setResult(null);
     setError(null);
     cachedReceiptData.current = null;
@@ -64,24 +36,23 @@ export default function VerifyPage() {
     setError(null);
 
     try {
-      // ── Step 1: Compress images before upload ──────────────────────────
-      setProgress('Compressing images…');
-      const compressedReceipts = await compressImages(receipts);
-      const compressedVoucher = await compressImage(voucher);
-
-      // ── Step 2: Extract each receipt sequentially (avoids hammering API) 
+      // ── Extract each receipt via Server Action ──────────────────────────
       const receiptData: ExtractedReceipt[] = [];
-      for (let i = 0; i < compressedReceipts.length; i++) {
-        setProgress(`Extracting receipt ${i + 1} of ${compressedReceipts.length}…`);
-        const data = await extractReceipt(compressedReceipts[i]);
+      for (let i = 0; i < receipts.length; i++) {
+        setProgress(`Reading receipt ${i + 1} of ${receipts.length}…`);
+        const fd = new FormData();
+        fd.append('file', receipts[i]);
+        const data = await extractReceiptAction(fd);
         receiptData.push(data);
       }
 
-      // ── Step 3: Extract voucher ────────────────────────────────────────
-      setProgress('Extracting payment voucher…');
-      const voucherData = await extractVoucher(compressedVoucher);
+      // ── Extract voucher via Server Action ───────────────────────────────
+      setProgress('Reading payment voucher…');
+      const fd = new FormData();
+      fd.append('file', voucher);
+      const voucherData = await extractVoucherAction(fd);
 
-      // ── Step 4: Run verification logic ─────────────────────────────────
+      // ── Verify ──────────────────────────────────────────────────────────
       setProgress('Running verification…');
       const verification = verifyDocuments(receiptData, voucherData);
 
@@ -90,8 +61,7 @@ export default function VerifyPage() {
       setResult(verification);
       setProgress('');
     } catch (err: any) {
-      console.error('Error processing files:', err);
-      setError(err.message || 'An unexpected error occurred. Please try again.');
+      setError(err.message || 'An unexpected error occurred.');
       setProgress('');
     } finally {
       setLoading(false);
@@ -101,35 +71,24 @@ export default function VerifyPage() {
   const handleExport = async () => {
     if (!result) return;
     setExporting(true);
-
     try {
-      const receiptsPayload = cachedReceiptData.current;
-      const voucherPayload = cachedVoucherData.current;
-
-      if (!receiptsPayload || !voucherPayload) {
-        setError('Please verify documents first before exporting.');
-        return;
-      }
-
       const response = await fetch('/api/export-report', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ receipts: receiptsPayload, voucher: voucherPayload }),
+        body: JSON.stringify({
+          receipts: cachedReceiptData.current,
+          voucher: cachedVoucherData.current,
+        }),
       });
-
-      if (!response.ok) {
-        const body = await response.json().catch(() => ({}));
-        throw new Error(parseApiError(response.status, body));
-      }
-
+      if (!response.ok) throw new Error('Export failed');
       const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
+      const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
       a.download = `audit-report-${new Date().toISOString().split('T')[0]}.pdf`;
       document.body.appendChild(a);
       a.click();
-      window.URL.revokeObjectURL(url);
+      URL.revokeObjectURL(url);
       document.body.removeChild(a);
     } catch (err: any) {
       setError(`Export failed: ${err.message}`);
@@ -142,7 +101,6 @@ export default function VerifyPage() {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
-      {/* Top Nav */}
       <header className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 rounded-lg bg-blue-700 flex items-center justify-center">
@@ -162,61 +120,42 @@ export default function VerifyPage() {
           <p className="text-slate-500 text-sm">Upload supplier receipts and a payment voucher to run an AI-powered audit.</p>
         </div>
 
-        {/* Error Banner */}
         {error && (
           <div className="mb-5 flex items-start gap-3 p-4 rounded-xl bg-red-50 border border-red-200">
-            <span className="text-red-500 text-lg flex-shrink-0">⚠</span>
+            <span className="text-red-500 flex-shrink-0">⚠</span>
             <div className="flex-1">
               <p className="text-sm font-semibold text-red-800">Something went wrong</p>
               <p className="text-sm text-red-700 mt-0.5">{error}</p>
             </div>
-            <button
-              onClick={clearError}
-              className="text-red-400 hover:text-red-600 transition-colors text-sm"
-            >
-              ✕
-            </button>
+            <button onClick={() => setError(null)} className="text-red-400 hover:text-red-600 text-sm">✕</button>
           </div>
         )}
 
-        {/* Upload Grid */}
         <div className="grid grid-cols-2 gap-5 mb-5">
           <DropZone
             label="Supplier Receipts"
-            hint="Upload one or more receipts (JPG, PNG, PDF)"
-            onDrop={(files) => {
-              setReceipts(files);
-              setResult(null);
-              setError(null);
-              cachedReceiptData.current = null;
-            }}
+            hint="JPG, PNG or PDF — up to 10MB each"
+            onDrop={(files) => { setReceipts(files); reset(); }}
             multiple
           />
           <DropZone
             label="Payment Voucher"
-            hint="Upload a single voucher document"
-            onDrop={(files) => {
-              setVoucher(files[0]);
-              setResult(null);
-              setError(null);
-              cachedVoucherData.current = null;
-            }}
+            hint="JPG, PNG or PDF — up to 10MB"
+            onDrop={(files) => { setVoucher(files[0]); reset(); }}
           />
         </div>
 
-        {/* File Lists */}
         {(receipts.length > 0 || voucher) && (
           <div className="grid grid-cols-2 gap-5 mb-6">
-            <FileList title="Receipts" files={receipts} onRemove={removeReceipt} />
-            <FileList title="Voucher" files={voucher ? [voucher] : []} onRemove={removeVoucher} />
+            <FileList title="Receipts" files={receipts} onRemove={(i) => { setReceipts(p => p.filter((_, j) => j !== i)); reset(); }} />
+            <FileList title="Voucher" files={voucher ? [voucher] : []} onRemove={() => { setVoucher(null); reset(); }} />
           </div>
         )}
 
-        {/* Action Bar */}
         <div className="flex gap-3 items-center">
           {(receipts.length > 0 || voucher) && (
             <button
-              onClick={clearAllFiles}
+              onClick={() => { setReceipts([]); setVoucher(null); reset(); }}
               className="px-4 py-2.5 rounded-lg text-sm text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 transition-colors"
             >
               Clear All
@@ -227,47 +166,31 @@ export default function VerifyPage() {
             onClick={processFiles}
             disabled={!canVerify}
             className={`flex-1 py-2.5 rounded-lg font-medium text-sm transition-all ${
-              canVerify
-                ? 'bg-blue-700 hover:bg-blue-800 text-white shadow-sm'
-                : 'bg-slate-200 text-slate-400 cursor-not-allowed'
+              canVerify ? 'bg-blue-700 hover:bg-blue-800 text-white shadow-sm' : 'bg-slate-200 text-slate-400 cursor-not-allowed'
             }`}
           >
-            {loading ? (
-              <span className="flex items-center justify-center gap-2">
-                <Spinner /> {progress || 'Verifying…'}
-              </span>
-            ) : (
-              'Verify Documents'
-            )}
+            {loading
+              ? <span className="flex items-center justify-center gap-2"><Spinner />{progress || 'Verifying…'}</span>
+              : 'Verify Documents'
+            }
           </button>
 
           {result && (
             <button
               onClick={handleExport}
               disabled={exporting}
-              className="px-5 py-2.5 rounded-lg font-medium text-sm bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm transition-all disabled:opacity-60"
+              className="px-5 py-2.5 rounded-lg font-medium text-sm bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm disabled:opacity-60"
             >
-              {exporting ? (
-                <span className="flex items-center gap-2"><Spinner /> Exporting…</span>
-              ) : (
-                '↓ Export PDF'
-              )}
+              {exporting ? <span className="flex items-center gap-2"><Spinner />Exporting…</span> : '↓ Export PDF'}
             </button>
           )}
         </div>
 
-        {/* Results */}
-        {result && (
-          <div className="mt-8">
-            <VerificationResults result={result} />
-          </div>
-        )}
+        {result && <div className="mt-8"><VerificationResults result={result} /></div>}
       </main>
     </div>
   );
 }
-
-// ── Sub-components ───────────────────────────────────────────────────────────
 
 function Spinner() {
   return (
@@ -278,30 +201,24 @@ function Spinner() {
   );
 }
 
-function DropZone({
-  label, hint, onDrop, multiple = false,
-}: {
+function DropZone({ label, hint, onDrop, multiple = false }: {
   label: string; hint: string; onDrop: (files: File[]) => void; multiple?: boolean;
 }) {
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
     multiple,
-    accept: { 'image/*': ['.jpeg', '.jpg', '.png'], 'application/pdf': ['.pdf'] },
+    accept: { 'image/*': ['.jpeg', '.jpg', '.png', '.webp'], 'application/pdf': ['.pdf'] },
   });
 
   return (
     <div
       {...getRootProps()}
-      className={`relative border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-all ${
-        isDragActive
-          ? 'border-blue-500 bg-blue-50'
-          : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50'
+      className={`border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-all ${
+        isDragActive ? 'border-blue-500 bg-blue-50' : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50'
       }`}
     >
       <input {...getInputProps()} />
-      <div className="w-10 h-10 mx-auto mb-3 rounded-full bg-slate-100 flex items-center justify-center text-xl">
-        📂
-      </div>
+      <div className="w-10 h-10 mx-auto mb-3 rounded-full bg-slate-100 flex items-center justify-center text-xl">📂</div>
       <p className="font-semibold text-slate-800 text-sm mb-1">{label}</p>
       <p className="text-xs text-slate-400">{isDragActive ? 'Drop here…' : hint}</p>
     </div>
@@ -309,12 +226,10 @@ function DropZone({
 }
 
 function FileList({ title, files, onRemove }: { title: string; files: File[]; onRemove?: (i: number) => void }) {
-  if (files.length === 0) return null;
+  if (!files.length) return null;
   return (
     <div className="bg-white border border-slate-200 rounded-xl p-4">
-      <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-3">
-        {title} ({files.length})
-      </p>
+      <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-3">{title} ({files.length})</p>
       <div className="space-y-2">
         {files.map((file, i) => (
           <div key={i} className="flex items-center justify-between bg-slate-50 rounded-lg px-3 py-2">
@@ -326,12 +241,7 @@ function FileList({ title, files, onRemove }: { title: string; files: File[]; on
               </div>
             </div>
             {onRemove && (
-              <button
-                onClick={() => onRemove(i)}
-                className="ml-2 text-slate-400 hover:text-red-500 transition-colors text-sm flex-shrink-0"
-              >
-                ✕
-              </button>
+              <button onClick={() => onRemove(i)} className="ml-2 text-slate-400 hover:text-red-500 text-sm flex-shrink-0">✕</button>
             )}
           </div>
         ))}
@@ -341,20 +251,18 @@ function FileList({ title, files, onRemove }: { title: string; files: File[]; on
 }
 
 function VerificationResults({ result }: { result: VerificationResult }) {
-  const statusConfig = {
-    PASS: { bg: 'bg-emerald-50', border: 'border-emerald-500', text: 'text-emerald-700', badge: 'bg-emerald-100 text-emerald-700' },
-    FAIL: { bg: 'bg-red-50', border: 'border-red-500', text: 'text-red-700', badge: 'bg-red-100 text-red-700' },
-    WARNING: { bg: 'bg-amber-50', border: 'border-amber-500', text: 'text-amber-700', badge: 'bg-amber-100 text-amber-700' },
+  const s = {
+    PASS:    { bg: 'bg-emerald-50', border: 'border-emerald-500', text: 'text-emerald-700', badge: 'bg-emerald-100 text-emerald-700' },
+    FAIL:    { bg: 'bg-red-50',     border: 'border-red-500',     text: 'text-red-700',     badge: 'bg-red-100 text-red-700' },
+    WARNING: { bg: 'bg-amber-50',   border: 'border-amber-500',   text: 'text-amber-700',   badge: 'bg-amber-100 text-amber-700' },
   }[result.status];
 
   return (
     <div className="space-y-5">
-      <div className={`p-5 rounded-xl border-2 ${statusConfig.bg} ${statusConfig.border}`}>
+      <div className={`p-5 rounded-xl border-2 ${s.bg} ${s.border}`}>
         <div className="flex items-center gap-3">
-          <span className={`px-3 py-1 rounded-full text-xs font-bold ${statusConfig.badge}`}>
-            {result.status}
-          </span>
-          <p className={`font-semibold ${statusConfig.text}`}>{result.summary}</p>
+          <span className={`px-3 py-1 rounded-full text-xs font-bold ${s.badge}`}>{result.status}</span>
+          <p className={`font-semibold ${s.text}`}>{result.summary}</p>
         </div>
       </div>
 
@@ -362,19 +270,13 @@ function VerificationResults({ result }: { result: VerificationResult }) {
         <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-4">Grand Total Reconciliation</p>
         <div className="grid grid-cols-3 gap-4">
           {[
-            { label: 'Voucher Total', value: result.grandTotalCheck.voucherTotal, color: '' },
+            { label: 'Voucher Total',  value: result.grandTotalCheck.voucherTotal,  color: '' },
             { label: 'Receipts Total', value: result.grandTotalCheck.receiptsTotal, color: '' },
-            {
-              label: 'Difference',
-              value: result.grandTotalCheck.difference,
-              color: result.grandTotalCheck.difference > 0 ? 'text-red-600' : 'text-emerald-600',
-            },
-          ].map((item) => (
+            { label: 'Difference',     value: result.grandTotalCheck.difference,    color: result.grandTotalCheck.difference > 0 ? 'text-red-600' : 'text-emerald-600' },
+          ].map(item => (
             <div key={item.label} className="bg-slate-50 rounded-lg p-4 text-center">
               <p className="text-xs text-slate-500 mb-1">{item.label}</p>
-              <p className={`text-lg font-bold ${item.color || 'text-slate-900'}`}>
-                ₦{item.value.toLocaleString()}
-              </p>
+              <p className={`text-lg font-bold ${item.color || 'text-slate-900'}`}>₦{item.value.toLocaleString()}</p>
             </div>
           ))}
         </div>
@@ -382,22 +284,13 @@ function VerificationResults({ result }: { result: VerificationResult }) {
 
       {result.discrepancies.length > 0 && (
         <div className="bg-white border border-slate-200 rounded-xl p-5">
-          <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-3">
-            Discrepancies ({result.discrepancies.length})
-          </p>
+          <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-3">Discrepancies ({result.discrepancies.length})</p>
           <div className="space-y-2">
             {result.discrepancies.map((d, i) => (
-              <div
-                key={i}
-                className={`flex items-start gap-3 p-3 rounded-lg border-l-4 ${
-                  d.severity === 'HIGH' ? 'border-red-500 bg-red-50'
-                  : d.severity === 'MEDIUM' ? 'border-amber-500 bg-amber-50'
-                  : 'border-yellow-400 bg-yellow-50'
-                }`}
-              >
-                <span className={`text-xs font-bold px-2 py-0.5 rounded flex-shrink-0 ${
-                  d.severity === 'HIGH' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'
-                }`}>
+              <div key={i} className={`flex items-start gap-3 p-3 rounded-lg border-l-4 ${
+                d.severity === 'HIGH' ? 'border-red-500 bg-red-50' : d.severity === 'MEDIUM' ? 'border-amber-500 bg-amber-50' : 'border-yellow-400 bg-yellow-50'
+              }`}>
+                <span className={`text-xs font-bold px-2 py-0.5 rounded flex-shrink-0 ${d.severity === 'HIGH' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}`}>
                   {d.severity}
                 </span>
                 <div>
@@ -412,9 +305,7 @@ function VerificationResults({ result }: { result: VerificationResult }) {
 
       {result.matches.length > 0 && (
         <div className="bg-white border border-slate-200 rounded-xl p-5">
-          <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-3">
-            Verified Matches ({result.matches.length})
-          </p>
+          <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-3">Verified Matches ({result.matches.length})</p>
           <div className="space-y-2">
             {result.matches.map((m, i) => (
               <div key={i} className="flex items-center gap-3 p-3 rounded-lg bg-emerald-50 border-l-4 border-emerald-500">
@@ -423,9 +314,7 @@ function VerificationResults({ result }: { result: VerificationResult }) {
                   <p className="text-sm font-medium text-slate-800">{m.entry.account_name}</p>
                   <p className="text-xs text-slate-500">{m.entry.bank} · Acct: {m.entry.account_number}</p>
                 </div>
-                <span className="text-sm font-bold text-emerald-700 flex-shrink-0">
-                  ₦{m.entry.amount.toLocaleString()}
-                </span>
+                <span className="text-sm font-bold text-emerald-700 flex-shrink-0">₦{m.entry.amount.toLocaleString()}</span>
               </div>
             ))}
           </div>
@@ -433,28 +322,4 @@ function VerificationResults({ result }: { result: VerificationResult }) {
       )}
     </div>
   );
-}
-
-// ── API helpers ──────────────────────────────────────────────────────────────
-
-async function extractReceipt(file: File): Promise<ExtractedReceipt> {
-  const formData = new FormData();
-  formData.append('file', file);
-  const response = await fetch('/api/extract-receipt', { method: 'POST', body: formData });
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    throw new Error(parseApiError(response.status, body));
-  }
-  return response.json();
-}
-
-async function extractVoucher(file: File): Promise<ExtractedVoucher> {
-  const formData = new FormData();
-  formData.append('file', file);
-  const response = await fetch('/api/extract-voucher', { method: 'POST', body: formData });
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    throw new Error(parseApiError(response.status, body));
-  }
-  return response.json();
 }
