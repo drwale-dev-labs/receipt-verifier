@@ -2,16 +2,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Anthropic from '@anthropic-ai/sdk';
 
-// ── FIX 1: Raise body size limit ────────────────────────────────────────────
-export const config = {
-  api: {
-    bodyParser: {
-      sizeLimit: '20mb',
-    },
-  },
-};
 
-export const maxDuration = 60;
+// NOTE: In Next.js App Router, Route Handler body size cannot be configured
+// via `export const config`. Vercel enforces a 4.5MB hard limit at the
+// infrastructure level. Files must be compressed client-side before upload.
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 

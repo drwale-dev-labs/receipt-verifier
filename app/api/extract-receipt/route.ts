@@ -2,19 +2,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Anthropic from '@anthropic-ai/sdk';
 
-// ── FIX 1: Raise Next.js body size limit from 4MB to 20MB ──────────────────
-// Phone-camera receipt photos are typically 5–10MB. Without this export,
-// Next.js silently returns 413 before your handler even runs.
-export const config = {
-  api: {
-    bodyParser: {
-      sizeLimit: '20mb',
-    },
-  },
-};
 
-// App Router equivalent — needed for Next.js 13+ App Router
-export const maxDuration = 60; // seconds (Vercel hobby = 60s max)
+// NOTE: In Next.js App Router, Route Handler body size cannot be configured
+// via `export const config`. Vercel enforces a 4.5MB hard limit at the
+// infrastructure level. Files must be compressed client-side before upload.
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
