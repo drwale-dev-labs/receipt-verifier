@@ -22,7 +22,9 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 // Claude's vision API has its own limit (~5MB per image in base64 ≈ ~3.75MB raw).
 // We resize large images client-side but also guard server-side here.
 // A 1200px-wide JPEG at quality 85 is more than sufficient for OCR.
-const MAX_BASE64_BYTES = 4.5 * 1024 * 1024; // 4.5MB base64 safety cap
+// Claude's vision API accepts images up to ~5MB raw (≈6.7MB base64).
+// We target 3MB raw on the client, so 4MB base64 is a generous server guard.
+const MAX_BASE64_BYTES = 5 * 1024 * 1024; // 5MB base64 safety cap
 
 function truncationWarning(originalSize: number, base64Size: number) {
   if (base64Size > MAX_BASE64_BYTES) {

@@ -15,7 +15,7 @@ export const maxDuration = 60;
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-const MAX_BASE64_BYTES = 4.5 * 1024 * 1024;
+const MAX_BASE64_BYTES = 5 * 1024 * 1024; // 5MB base64 safety cap
 
 export async function POST(req: NextRequest) {
   if (!process.env.ANTHROPIC_API_KEY) {
