@@ -121,7 +121,7 @@ describe('claudeClient — extractReceipt', () => {
 
     const { extractReceipt } = await import('../lib/claudeClient');
     await expect(extractReceipt(makeFile())).rejects.toThrow(
-      'Claude returned an unreadable response'
+      "Could not parse Claude's response as JSON"
     );
   });
 
