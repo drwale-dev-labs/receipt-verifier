@@ -1,8 +1,7 @@
 // lib/claudeClient.ts
 // Calls the Anthropic API directly from the browser.
-// The file is converted to base64 in the browser and sent straight to
-// api.anthropic.com — it never passes through your Vercel server,
-// so there is no 4.5MB infrastructure limit to hit.
+// Files are converted to base64 in the browser and sent to api.anthropic.com
+// directly — never through Vercel, so no 4.5MB infrastructure limit applies.
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 
@@ -60,11 +59,10 @@ Return ONLY valid JSON with no markdown, no code fences, no extra text:
 
 For Nigerian Naira amounts, strip the symbol and return pure numbers.`;
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-// Cache the key for the session — only fetch once
 let cachedKey: string | null = null;
 
 async function getKey(): Promise<string> {
@@ -76,32 +74,27 @@ async function getKey(): Promise<string> {
   return key;
 }
 
-// Convert a File to base64 string entirely in the browser
 function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = () => {
-      const result = reader.result as string;
-      resolve(result.split(',')[1]);
-    };
+    reader.onload = () => resolve((reader.result as string).split(',')[1]);
     reader.onerror = () => reject(new Error('Failed to read file'));
     reader.readAsDataURL(file);
   });
 }
 
 // ── Rate limiting ─────────────────────────────────────────────────────────────
-// Anthropic free/build tier: 30,000 input tokens/minute.
-// A high-res receipt image costs ~1,500–4,000 tokens. 
+// Anthropic build tier: 30,000 input tokens/minute.
+// A high-res receipt image costs ~1,500–4,000 tokens.
 // 8s between calls ≈ 7 calls/minute — safe with headroom.
 const INTER_REQUEST_DELAY_MS = 8_000;
 let callCount = 0;
 
-/** Reset between verification sessions so the first call is never delayed. */
 export function resetCallCount() {
   callCount = 0;
 }
 
-// ── Core API call with retry on 429 ──────────────────────────────────────────
+// ── Core API call with retry on 429 ───────────────────────────────────────────
 
 async function callClaude(
   base64: string,
@@ -120,14 +113,8 @@ async function callClaude(
         role: 'user',
         content: [
           isPdf
-            ? {
-                type: 'document',
-                source: { type: 'base64', media_type: 'application/pdf', data: base64 },
-              }
-            : {
-                type: 'image',
-                source: { type: 'base64', media_type: mediaType, data: base64 },
-              },
+            ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } }
+            : { type: 'image',    source: { type: 'base64', media_type: mediaType, data: base64 } },
           { type: 'text', text: prompt },
         ],
       },
@@ -145,7 +132,6 @@ async function callClaude(
     body: JSON.stringify(body),
   });
 
-  // Rate limited — read retry-after header and wait, then retry
   if (res.status === 429) {
     if (attempt > 3) {
       throw new Error(
@@ -166,13 +152,48 @@ async function callClaude(
   }
 
   const data = await res.json();
+
+  // ── Stop-reason guard ─────────────────────────────────────────────────────
+  // If Claude hit max_tokens mid-JSON, stop_reason = 'max_tokens' and the
+  // text will be truncated/invalid. Detect and raise max_tokens instead.
+  const stopReason: string = data.stop_reason ?? '';
+  if (stopReason === 'max_tokens') {
+    throw new Error(
+      'Response was cut off (max_tokens reached). ' +
+      'This receipt may be too complex. Try uploading it alone.',
+    );
+  }
+
   const text: string = data.content?.[0]?.text ?? '';
-  const cleaned = text.replace(/```json\n?|```\n?/g, '').trim();
+
+  // Log the raw response so you can inspect it in the browser console
+  console.log('[claudeClient] raw response:', text);
+
+  // Strip markdown fences if Claude wrapped the JSON anyway
+  const cleaned = text
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+
+  // If the response is empty, give a specific message
+  if (!cleaned) {
+    throw new Error(
+      'Claude returned an empty response. ' +
+      'The image may be too blurry or low contrast to read.',
+    );
+  }
 
   try {
     return JSON.parse(cleaned);
-  } catch {
-    throw new Error('Claude returned an unreadable response. Please try again.');
+  } catch (parseErr) {
+    // Log the exact text that failed to parse so you can see it in DevTools
+    console.error('[claudeClient] JSON.parse failed on:', cleaned);
+    throw new Error(
+      `Could not parse Claude's response as JSON. ` +
+      `Open the browser console to see what was returned. ` +
+      `Raw text: "${cleaned.slice(0, 120)}${cleaned.length > 120 ? '…' : ''}"`,
+    );
   }
 }
 
