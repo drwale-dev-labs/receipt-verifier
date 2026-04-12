@@ -1,34 +1,14 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+// tests/extract-receipt.test.ts
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-// ── Mock setup ───────────────────────────────────────────────────────────────
-// Anthropic is instantiated with `new Anthropic()` so the mock must be a class,
-// not an arrow function. We use a proper vi.fn() class with a shared mockCreate
-// so each test can control what messages.create() returns.
-
-const mockCreate = vi.fn();
-
-vi.mock('@anthropic-ai/sdk', () => {
-  return {
-    default: vi.fn().mockImplementation(function (this: { messages: { create: typeof mockCreate } }) {
-      this.messages = { create: mockCreate };
-    }),
-  };
-});
-
-vi.mock('next/server', () => ({
-  NextRequest: class {
-    constructor(public url: string, public init?: RequestInit) {}
-    async formData() { return new FormData(); }
-  },
-  NextResponse: {
-    json: (data: unknown, init?: ResponseInit) => ({
-      status: init?.status ?? 200,
-      json: async () => data,
-    }),
-  },
-}));
-
-// ── Fixtures ─────────────────────────────────────────────────────────────────
+// ── What changed and why ──────────────────────────────────────────────────────
+// The old test imported POST from app/api/extract-receipt/route.ts, which was
+// deleted when we switched to calling Anthropic directly from the browser via
+// lib/claudeClient.ts. The route no longer exists so the import errored.
+//
+// claudeClient.ts uses the browser fetch API (not the Anthropic SDK class), so
+// we mock globalThis.fetch instead of @anthropic-ai/sdk.
+// ─────────────────────────────────────────────────────────────────────────────
 
 const mockReceiptJSON = {
   supplier_name: 'Fanice Nigeria Ltd',
@@ -46,80 +26,117 @@ const mockReceiptJSON = {
   notes: '',
 };
 
-function makeFile(type = 'image/jpeg') {
-  return new File(['fake-image-bytes'], 'receipt.jpg', { type });
+// Helper: build a fake Anthropic API response wrapping the given text
+function makeAnthropicResponse(text: string) {
+  return {
+    ok: true,
+    json: async () => ({
+      content: [{ type: 'text', text }],
+    }),
+  };
 }
 
-function makeRequest(file: File) {
-  const formData = new FormData();
-  formData.append('file', file);
-  return { formData: async () => formData } as any;
+// Helper: fake the /api/anthropic-key response
+function makeKeyResponse() {
+  return {
+    ok: true,
+    json: async () => ({ key: 'sk-ant-test-key' }),
+  };
 }
 
-function makeEmptyRequest() {
-  return { formData: async () => new FormData() } as any;
+function makeFile(name = 'receipt.jpg', type = 'image/jpeg') {
+  return new File(['fake-image-bytes'], name, { type });
 }
 
-// ── Tests ────────────────────────────────────────────────────────────────────
+describe('claudeClient — extractReceipt', () => {
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
 
-describe('POST /api/extract-receipt', () => {
   beforeEach(() => {
     vi.resetModules();
-    mockCreate.mockReset();
-    process.env.ANTHROPIC_API_KEY = 'sk-ant-test-key';
+    // Reset module-level key cache between tests
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
   });
 
-  it('returns parsed JSON from Claude on success', async () => {
-    mockCreate.mockResolvedValueOnce({
-      content: [{ type: 'text', text: JSON.stringify(mockReceiptJSON) }],
-    });
+  afterEach(() => {
+    fetchSpy.mockRestore();
+  });
 
-    const { POST } = await import('../app/api/extract-receipt/route');
-    const response = await POST(makeRequest(makeFile()));
-    const data = await response.json();
+  it('fetches the key then calls Anthropic and returns parsed JSON', async () => {
+    fetchSpy
+      .mockResolvedValueOnce(makeKeyResponse() as any)           // /api/anthropic-key
+      .mockResolvedValueOnce(                                     // api.anthropic.com
+        makeAnthropicResponse(JSON.stringify(mockReceiptJSON)) as any
+      );
 
-    expect(data.supplier_name).toBe('Fanice Nigeria Ltd');
-    expect(data.total_amount).toBe(50000);
+    const { extractReceipt } = await import('../lib/claudeClient');
+    const result = await extractReceipt(makeFile());
+
+    expect(result.supplier_name).toBe('Fanice Nigeria Ltd');
+    expect(result.total_amount).toBe(50000);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+
+    // Second call must go to Anthropic, not our server
+    const [anthropicUrl] = fetchSpy.mock.calls[1] as [string, ...unknown[]];
+    expect(anthropicUrl).toContain('anthropic.com');
   });
 
   it('strips markdown fences from Claude response', async () => {
-    mockCreate.mockResolvedValueOnce({
-      content: [{ type: 'text', text: `\`\`\`json\n${JSON.stringify(mockReceiptJSON)}\n\`\`\`` }],
-    });
+    fetchSpy
+      .mockResolvedValueOnce(makeKeyResponse() as any)
+      .mockResolvedValueOnce(
+        makeAnthropicResponse(`\`\`\`json\n${JSON.stringify(mockReceiptJSON)}\n\`\`\``) as any
+      );
 
-    const { POST } = await import('../app/api/extract-receipt/route');
-    const response = await POST(makeRequest(makeFile()));
-    const data = await response.json();
+    const { extractReceipt } = await import('../lib/claudeClient');
+    const result = await extractReceipt(makeFile());
 
-    expect(data.supplier_name).toBe('Fanice Nigeria Ltd');
+    expect(result.supplier_name).toBe('Fanice Nigeria Ltd');
   });
 
-  it('returns 500 if ANTHROPIC_API_KEY is missing', async () => {
-    delete process.env.ANTHROPIC_API_KEY;
+  it('throws if the key endpoint fails', async () => {
+    fetchSpy.mockResolvedValueOnce({ ok: false, json: async () => ({}) } as any);
 
-    const { POST } = await import('../app/api/extract-receipt/route');
-    const response = await POST(makeRequest(makeFile()));
-
-    expect(response.status).toBe(500);
-    const data = await response.json();
-    expect(data.error).toMatch(/ANTHROPIC_API_KEY/);
+    const { extractReceipt } = await import('../lib/claudeClient');
+    await expect(extractReceipt(makeFile())).rejects.toThrow('Failed to load API configuration');
   });
 
-  it('returns 400 if no file is provided', async () => {
-    const { POST } = await import('../app/api/extract-receipt/route');
-    const response = await POST(makeEmptyRequest());
+  it('throws if Anthropic returns a non-ok status', async () => {
+    fetchSpy
+      .mockResolvedValueOnce(makeKeyResponse() as any)
+      .mockResolvedValueOnce({
+        ok: false,
+        json: async () => ({ error: { message: 'Invalid API key' } }),
+      } as any);
 
-    expect(response.status).toBe(400);
+    const { extractReceipt } = await import('../lib/claudeClient');
+    await expect(extractReceipt(makeFile())).rejects.toThrow('Invalid API key');
   });
 
-  it('returns 502 if Claude returns invalid JSON', async () => {
-    mockCreate.mockResolvedValueOnce({
-      content: [{ type: 'text', text: 'not valid json at all' }],
-    });
+  it('throws if Claude returns invalid JSON', async () => {
+    fetchSpy
+      .mockResolvedValueOnce(makeKeyResponse() as any)
+      .mockResolvedValueOnce(
+        makeAnthropicResponse('not valid json at all') as any
+      );
 
-    const { POST } = await import('../app/api/extract-receipt/route');
-    const response = await POST(makeRequest(makeFile()));
+    const { extractReceipt } = await import('../lib/claudeClient');
+    await expect(extractReceipt(makeFile())).rejects.toThrow(
+      'Claude returned an unreadable response'
+    );
+  });
 
-    expect(response.status).toBe(502);
+  it('sends the anthropic-dangerous-direct-browser-access header', async () => {
+    fetchSpy
+      .mockResolvedValueOnce(makeKeyResponse() as any)
+      .mockResolvedValueOnce(
+        makeAnthropicResponse(JSON.stringify(mockReceiptJSON)) as any
+      );
+
+    const { extractReceipt } = await import('../lib/claudeClient');
+    await extractReceipt(makeFile());
+
+    const [, anthropicInit] = fetchSpy.mock.calls[1] as [string, RequestInit];
+    const headers = anthropicInit.headers as Record<string, string>;
+    expect(headers['anthropic-dangerous-direct-browser-access']).toBe('true');
   });
 });
