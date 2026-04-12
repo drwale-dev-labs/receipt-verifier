@@ -2,7 +2,7 @@
 // app/verify/page.tsx
 import { useState, useRef } from 'react';
 import { useDropzone } from 'react-dropzone';
-import { extractReceipt, extractVoucher } from '../../lib/claudeClient';
+import { extractReceipt, extractVoucher, resetCallCount } from '../../lib/claudeClient';
 import { verifyDocuments } from '../../lib/verificationEngine';
 import type { VerificationResult, ExtractedReceipt, ExtractedVoucher } from '../../lib/verificationEngine';
 
@@ -27,6 +27,7 @@ export default function VerifyPage() {
 
   const processFiles = async () => {
     if (!voucher || receipts.length === 0) return;
+    resetCallCount();
     setLoading(true);
     setError(null);
 

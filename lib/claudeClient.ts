@@ -60,6 +60,10 @@ Return ONLY valid JSON with no markdown, no code fences, no extra text:
 
 For Nigerian Naira amounts, strip the symbol and return pure numbers.`;
 
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 // Cache the key for the session — only fetch once
 let cachedKey: string | null = null;
 
@@ -77,7 +81,6 @@ function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
-      // result is "data:image/jpeg;base64,/9j/4AAQ..." — strip the prefix
       const result = reader.result as string;
       resolve(result.split(',')[1]);
     };
@@ -86,7 +89,26 @@ function fileToBase64(file: File): Promise<string> {
   });
 }
 
-async function callClaude(base64: string, mediaType: string, prompt: string): Promise<any> {
+// ── Rate limiting ─────────────────────────────────────────────────────────────
+// Anthropic free/build tier: 30,000 input tokens/minute.
+// A high-res receipt image costs ~1,500–4,000 tokens. 
+// 8s between calls ≈ 7 calls/minute — safe with headroom.
+const INTER_REQUEST_DELAY_MS = 8_000;
+let callCount = 0;
+
+/** Reset between verification sessions so the first call is never delayed. */
+export function resetCallCount() {
+  callCount = 0;
+}
+
+// ── Core API call with retry on 429 ──────────────────────────────────────────
+
+async function callClaude(
+  base64: string,
+  mediaType: string,
+  prompt: string,
+  attempt = 1,
+): Promise<any> {
   const key = await getKey();
   const isPdf = mediaType === 'application/pdf';
 
@@ -118,10 +140,25 @@ async function callClaude(base64: string, mediaType: string, prompt: string): Pr
       'Content-Type': 'application/json',
       'x-api-key': key,
       'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-access': 'true', // required for browser calls
+      'anthropic-dangerous-direct-browser-access': 'true',
     },
     body: JSON.stringify(body),
   });
+
+  // Rate limited — read retry-after header and wait, then retry
+  if (res.status === 429) {
+    if (attempt > 3) {
+      throw new Error(
+        'Rate limit exceeded after 3 retries. Please wait a minute and try again, ' +
+        'or upload fewer receipts at once.',
+      );
+    }
+    const retryAfter = res.headers.get('retry-after');
+    const waitMs = retryAfter ? parseFloat(retryAfter) * 1000 : 15_000 * attempt;
+    console.warn(`[claudeClient] 429 — waiting ${waitMs / 1000}s (retry ${attempt}/3)`);
+    await sleep(waitMs);
+    return callClaude(base64, mediaType, prompt, attempt + 1);
+  }
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -139,12 +176,22 @@ async function callClaude(base64: string, mediaType: string, prompt: string): Pr
   }
 }
 
+async function throttledCall(base64: string, mediaType: string, prompt: string) {
+  if (callCount > 0) {
+    await sleep(INTER_REQUEST_DELAY_MS);
+  }
+  callCount++;
+  return callClaude(base64, mediaType, prompt);
+}
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
 export async function extractReceipt(file: File) {
   const base64 = await fileToBase64(file);
-  return callClaude(base64, file.type, RECEIPT_PROMPT);
+  return throttledCall(base64, file.type, RECEIPT_PROMPT);
 }
 
 export async function extractVoucher(file: File) {
   const base64 = await fileToBase64(file);
-  return callClaude(base64, file.type, VOUCHER_PROMPT);
+  return throttledCall(base64, file.type, VOUCHER_PROMPT);
 }
